@@ -81,6 +81,46 @@ class PlatoSoraPlugin(Star):
                     return image_bytes
         return await self._find_image_in_segments(event.message_obj.message)
 
+    def _find_video_info_in_segments(self, segments: List[Any]) -> Tuple[Optional[str], Optional[str]]:
+        """从消息段中查找视频 URL 和方向，返回 (url, orientation)"""
+        for seg in segments:
+            if isinstance(seg, Comp.Video):
+                # 尝试多种属性获取视频 URL
+                url = None
+                for attr in ['url', 'file', 'path']:
+                    val = getattr(seg, attr, None)
+                    if val and isinstance(val, str) and val.startswith("http"):
+                        url = val
+                        break
+                
+                # 记录视频组件的所有属性（调试用）
+                seg_attrs = {k: getattr(seg, k, None) for k in ['url', 'file', 'path', 'width', 'height'] if hasattr(seg, k)}
+                logger.info(f"[视频提取] 视频组件属性: {seg_attrs}")
+                
+                if url:
+                    # 尝试从视频组件获取尺寸信息
+                    orientation = None
+                    width = getattr(seg, 'width', None)
+                    height = getattr(seg, 'height', None)
+                    if width and height:
+                        orientation = "landscape" if width >= height else "portrait"
+                        logger.info(f"[视频提取] 尺寸: {width}x{height} -> {orientation}")
+                    return url, orientation
+                else:
+                    logger.warning(f"[视频提取] 检测到视频但无法获取 URL")
+        return None, None
+
+    def _get_video_info_from_event(self, event: AstrMessageEvent) -> Tuple[Optional[str], Optional[str]]:
+        """从消息事件中提取视频信息（支持引用和直接发送），返回 (url, orientation)"""
+        # 先检查引用消息
+        for seg in event.message_obj.message:
+            if isinstance(seg, Comp.Reply) and seg.chain:
+                url, orientation = self._find_video_info_in_segments(seg.chain)
+                if url:
+                    return url, orientation
+        # 再检查直接发送的消息
+        return self._find_video_info_in_segments(event.message_obj.message)
+
     async def _get_aspect_ratio_from_image(self, image_bytes: bytes) -> Optional[str]:
         """从图片字节识别方向（横屏/竖屏）"""
         if not Image:
@@ -305,9 +345,17 @@ class PlatoSoraPlugin(Star):
                             text = await resp.text()
                             return None, f"API 请求失败 (状态码: {resp.status}): {text[:200]}"
                         
-                        video_url = await self._parse_stream_response(resp)
+                        video_url, result_text = await self._parse_stream_with_wait(resp)
                         if video_url:
                             return video_url, None
+                        
+                        # 检查是否为 API 错误
+                        if result_text and result_text.startswith("API_ERROR:"):
+                            return None, result_text[10:]  # 移除前缀，返回错误信息
+                        
+                        # 日志输出完整响应以便调试
+                        if result_text:
+                            logger.warning(f"[Sora] 未能从响应中提取视频 URL，完整响应: {result_text[:1000]}")
                         return None, "API 响应中未包含有效视频 URL"
                         
                 except asyncio.TimeoutError:
@@ -321,9 +369,104 @@ class PlatoSoraPlugin(Star):
             
             return None, "所有重试均失败"
         
+        async def _parse_stream_with_wait(self, resp) -> Tuple[Optional[str], str]:
+            """解析流式响应，实时检测状态和 URL，返回 (video_url, error_or_text)"""
+            video_url = None
+            accumulated = []
+            chunk_count = 0
+            raw_lines = []
+            api_error = None
+            
+            async for line in resp.content:
+                if not line or not line.strip():
+                    continue
+                
+                try:
+                    line_str = line.decode('utf-8').strip()
+                except UnicodeDecodeError:
+                    continue
+                
+                # 记录原始行
+                if len(raw_lines) < 20 or any(kw in line_str.lower() for kw in ['url', 'http', 'video', 'mp4', 'error', 'status']):
+                    raw_lines.append(line_str[:300])
+                
+                # 提取 SSE 载荷
+                payload_str = PlatoSoraPlugin._extract_sse_payload(line_str)
+                if payload_str is None:
+                    # 尝试直接解析 JSON
+                    if line_str.startswith('{'):
+                        try:
+                            chunk = json.loads(line_str)
+                            # 检查 API 错误
+                            if chunk.get("error"):
+                                api_error = chunk["error"].get("message", str(chunk["error"]))
+                                logger.error(f"[Sora] API 返回错误: {api_error}")
+                            content = PlatoSoraPlugin._extract_content_from_chunk(chunk)
+                            if content:
+                                accumulated.append(content)
+                                url = PlatoSoraPlugin._extract_video_url(content)
+                                if url:
+                                    video_url = url
+                                    logger.info(f"[Sora] 从 JSON 提取视频 URL: {url[:100]}...")
+                        except json.JSONDecodeError:
+                            pass
+                    continue
+                
+                payload_str = payload_str.strip()
+                if payload_str in ('[DONE]', 'done', ''):
+                    logger.info("[Sora] 流式响应结束")
+                    break
+                
+                chunk_count += 1
+                
+                try:
+                    chunk = json.loads(payload_str)
+                    
+                    # 检查 API 错误
+                    if chunk.get("error"):
+                        api_error = chunk["error"].get("message", str(chunk["error"]))
+                        logger.error(f"[Sora] API 返回错误: {api_error}")
+                        continue
+                    
+                    content = PlatoSoraPlugin._extract_content_from_chunk(chunk)
+                    
+                    if content:
+                        accumulated.append(content)
+                        
+                        # 实时检测 URL
+                        url = PlatoSoraPlugin._extract_video_url(content)
+                        if url:
+                            video_url = url
+                            logger.info(f"[Sora] 检测到视频 URL: {url[:100]}...")
+                        
+                        # 输出进度日志
+                        if chunk_count % 10 == 0 or any(kw in content.lower() for kw in ['生成', 'generat', 'complet', 'finish', 'url', 'http']):
+                            logger.info(f"[Sora] 块 #{chunk_count}: {content[:200]}...")
+                            
+                except json.JSONDecodeError:
+                    if payload_str.startswith(("http://", "https://")):
+                        video_url = payload_str.split()[0]
+                        logger.info(f"[Sora] 检测到直接 URL: {video_url[:100]}...")
+            
+            full_text = "".join(accumulated)
+            
+            # 输出调试信息
+            if not video_url:
+                logger.warning(f"[Sora] 共收到 {len(raw_lines)} 行原始响应，{chunk_count} 个有效块")
+                for i, raw_line in enumerate(raw_lines[:10]):
+                    logger.warning(f"[Sora] 原始行 {i+1}: {raw_line}")
+                if full_text:
+                    logger.warning(f"[Sora] 累积文本: {full_text[:500]}...")
+            
+            # 如果有 API 错误，优先返回错误信息
+            if api_error:
+                return None, f"API_ERROR:{api_error}"
+            
+            return video_url, full_text
+        
         async def _parse_stream_response(self, resp) -> Optional[str]:
             """解析流式响应，提取视频 URL"""
-            video_url, _ = await PlatoSoraPlugin._parse_stream_response(resp, "Sora")
+            video_url, _ = await self._parse_stream_with_wait(resp)
             return video_url
         
         async def terminate(self):
@@ -464,13 +607,16 @@ class PlatoSoraPlugin(Star):
         if not self.sora_client:
             yield event.plain_result("❌ Sora 客户端未初始化，请检查配置")
             return
-        
-        text = prompt.strip() if prompt else event.message_str.strip()
+        # 优先使用 event.message_str 获取完整消息
+        text = event.message_str.strip()
         if not text:
             return
 
+        logger.info(f"[Sora] 原始输入: '{text}'")
         prompt_text, params = self._parse_sora_params(text)
+        logger.info(f"[Sora] 解析结果: prompt='{prompt_text}', params={params}")
         if not prompt_text:
+            logger.warning(f"[Sora] 解析后 prompt 为空，忽略命令")
             return
 
         can_proceed, error_message = await self._check_permissions(event)
@@ -479,18 +625,8 @@ class PlatoSoraPlugin(Star):
                 yield event.plain_result(error_message)
             return
         
-        # 并发限制
-        user_id = str(event.get_sender_id())
-        if user_id in self._sora_processing:
-            yield event.plain_result("⚠️ 您已有 Sora 任务在进行中")
-            return
-        
-        self._sora_processing.add(user_id)
-        try:
-            async for result in self._generate_sora_video(event, prompt_text, params):
-                yield result
-        finally:
-            self._sora_processing.discard(user_id)
+        async for result in self._generate_sora_video(event, prompt_text, params):
+            yield result
 
         event.stop_event()
 
@@ -498,8 +634,11 @@ class PlatoSoraPlugin(Star):
         """解析 Sora 参数（横/竖屏、时长）"""
         params = {}
         
-        if text.startswith("sora"):
-            text = text.removeprefix("sora").strip()
+        # 移除命令前缀
+        for prefix in ["/sora", "sora"]:
+            if text.lower().startswith(prefix):
+                text = text[len(prefix):].strip()
+                break
 
         parts = text.split()
         prompt_start = 0
@@ -530,30 +669,41 @@ class PlatoSoraPlugin(Star):
     async def _generate_sora_video(self, event: AstrMessageEvent, prompt: str, params: Dict[str, Any]):
         """Sora 视频生成核心逻辑"""
         image_bytes = await self._get_image_from_event(event)
+        video_url_for_remix, video_orientation = self._get_video_info_from_event(event)
         
-        duration = params.get('duration', 25)
+        duration = params.get('duration', 15)
         duration = min(max(duration, 10), 25)
         
-        # 确定模型
-        if image_bytes:
-            # 图生视频：自动识别图片方向
-            orientation = await self._get_aspect_ratio_from_image(image_bytes)
-            if not orientation:
-                yield event.plain_result("❌ 无法识别图片方向")
-                return
-            model = f"sora2-{orientation}-{duration}s"
-            logger.info(f"图生视频 - 方向: {orientation}, 时长: {duration}秒, 模型: {model}")
-        elif 'orientation' in params:
-            # 文生视频：用户指定了方向
-            orientation = params['orientation']
-            model = f"sora2-{orientation}-{duration}s"
-            logger.info(f"文生视频 - 方向: {orientation}, 时长: {duration}秒, 模型: {model}")
-        else:
-            # 文生视频：用户未指定方向，使用配置的默认模型
-            model = self.conf.get("sora_model", "sora2-landscape-25s")
-            logger.info(f"文生视频 - 使用默认模型: {model}")
+        # ===== 确定生成模式 =====
         
-        yield event.plain_result(f"🎬 正在进行 [{'图生视频' if image_bytes else '文生视频'}] ...")
+        # 用户指定的方向优先，否则使用自动识别或默认值
+        user_orientation = params.get('orientation')
+        
+        # 视频二创（引用或发送了视频）
+        if video_url_for_remix:
+            # 方向：用户指定 > 视频自动识别 > 默认横屏
+            orientation = user_orientation or video_orientation or 'landscape'
+            prompt = f"{video_url_for_remix} {prompt}"
+            model = f"sora2-{orientation}-{duration}s"
+            mode_name = "视频二创"
+            logger.info(f"[{mode_name}] URL: {video_url_for_remix[:80]}...")
+        
+        # 图生视频（引用或发送了图片）
+        elif image_bytes:
+            # 方向：用户指定 > 图片自动识别 > 默认横屏
+            auto_orientation = await self._get_aspect_ratio_from_image(image_bytes)
+            orientation = user_orientation or auto_orientation or 'landscape'
+            model = f"sora2-{orientation}-{duration}s"
+            mode_name = "图生视频"
+        
+        # 文生视频（纯文本）
+        else:
+            orientation = user_orientation or 'landscape'
+            model = f"sora2-{orientation}-{duration}s"
+            mode_name = "文生视频"
+        
+        logger.info(f"[{mode_name}] 方向: {orientation}, 时长: {duration}秒, 模型: {model}")
+        yield event.plain_result(f"🎬 正在进行 [{mode_name}] ...")
 
         # 调用 API（统一的同步接口）
         video_url, error_msg = await self.sora_client.generate_video(
@@ -608,36 +758,26 @@ class PlatoSoraPlugin(Star):
             yield event.plain_result("❌ Grok 需要图片，请上传或引用图片")
             return
         
-        user_id = str(event.get_sender_id())
-        if user_id in self._grok_processing:
-            yield event.plain_result("⚠️ 您已有 Grok 任务在进行中")
-            return
-        
-        self._grok_processing.add(user_id)
         yield event.plain_result("🎬 正在进行 [图生视频] ...")
         
-        try:
-            video_url, error_msg = await self.grok_client.generate_video(prompt, image_bytes)
-            
-            if error_msg:
-                yield event.plain_result(f"❌ 生成失败: {error_msg}")
-                return
-            
-            if not video_url:
-                yield event.plain_result("❌ 未能获取到视频 URL")
-                return
-            
-            logger.info(f"正在下载视频: {video_url}")
-            video_bytes = await self._download_media(video_url)
-            
-            if video_bytes:
-                async for result in self._save_and_send_video(event, video_url, video_bytes, "grok"):
-                    yield result
-            else:
-                yield event.plain_result(f"❌ 视频下载失败，链接: {video_url}")
+        video_url, error_msg = await self.grok_client.generate_video(prompt, image_bytes)
         
-        finally:
-            self._grok_processing.discard(user_id)
+        if error_msg:
+            yield event.plain_result(f"❌ 生成失败: {error_msg}")
+            return
+        
+        if not video_url:
+            yield event.plain_result("❌ 未能获取到视频 URL")
+            return
+        
+        logger.info(f"正在下载视频: {video_url}")
+        video_bytes = await self._download_media(video_url)
+        
+        if video_bytes:
+            async for result in self._save_and_send_video(event, video_url, video_bytes, "grok"):
+                yield result
+        else:
+            yield event.plain_result(f"❌ 视频下载失败，链接: {video_url}")
 
     # ==================== 帮助命令 ====================
 

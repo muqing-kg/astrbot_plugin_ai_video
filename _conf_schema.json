@@ -21,7 +21,7 @@
         "description": "【Sora】模型 ID",
         "hint": "设置默认使用的视频生成模型名称",
         "type": "string",
-        "default": "sora2-landscape-25s"
+        "default": "sora2-landscape-15s"
     },
     "grok_enabled": {
         "description": "【Grok】启用 Grok 视频生成",
@@ -82,17 +82,5 @@
             "type": "string"
         },
         "default": []
-    },
-    "polling_interval": {
-        "description": "【高级】任务状态检查间隔（秒）",
-        "hint": "向API查询视频生成任务状态的轮询间隔时间",
-        "type": "int",
-        "default": 5
-    },
-    "polling_timeout": {
-        "description": "【高级】任务超时时间（秒）",
-        "hint": "等待视频生成任务完成的最长时间",
-        "type": "int",
-        "default": 1500
     }
 }
