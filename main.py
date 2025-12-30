@@ -81,45 +81,6 @@ class PlatoSoraPlugin(Star):
                     return image_bytes
         return await self._find_image_in_segments(event.message_obj.message)
 
-    def _find_video_info_in_segments(self, segments: List[Any]) -> Tuple[Optional[str], Optional[str]]:
-        """从消息段中查找视频 URL 和方向，返回 (url, orientation)"""
-        for seg in segments:
-            if isinstance(seg, Comp.Video):
-                # 尝试多种属性获取视频 URL
-                url = None
-                for attr in ['url', 'file', 'path']:
-                    val = getattr(seg, attr, None)
-                    if val and isinstance(val, str) and val.startswith("http"):
-                        url = val
-                        break
-                
-                # 记录视频组件的所有属性（调试用）
-                seg_attrs = {k: getattr(seg, k, None) for k in ['url', 'file', 'path', 'width', 'height'] if hasattr(seg, k)}
-                logger.info(f"[视频提取] 视频组件属性: {seg_attrs}")
-                
-                if url:
-                    # 尝试从视频组件获取尺寸信息
-                    orientation = None
-                    width = getattr(seg, 'width', None)
-                    height = getattr(seg, 'height', None)
-                    if width and height:
-                        orientation = "landscape" if width >= height else "portrait"
-                        logger.info(f"[视频提取] 尺寸: {width}x{height} -> {orientation}")
-                    return url, orientation
-                else:
-                    logger.warning(f"[视频提取] 检测到视频但无法获取 URL")
-        return None, None
-
-    def _get_video_info_from_event(self, event: AstrMessageEvent) -> Tuple[Optional[str], Optional[str]]:
-        """从消息事件中提取视频信息（支持引用和直接发送），返回 (url, orientation)"""
-        # 先检查引用消息
-        for seg in event.message_obj.message:
-            if isinstance(seg, Comp.Reply) and seg.chain:
-                url, orientation = self._find_video_info_in_segments(seg.chain)
-                if url:
-                    return url, orientation
-        # 再检查直接发送的消息
-        return self._find_video_info_in_segments(event.message_obj.message)
 
     async def _get_aspect_ratio_from_image(self, image_bytes: bytes) -> Optional[str]:
         """从图片字节识别方向（横屏/竖屏）"""
@@ -464,11 +425,6 @@ class PlatoSoraPlugin(Star):
             
             return video_url, full_text
         
-        async def _parse_stream_response(self, resp) -> Optional[str]:
-            """解析流式响应，提取视频 URL"""
-            video_url, _ = await self._parse_stream_with_wait(resp)
-            return video_url
-        
         async def terminate(self):
             if self.session and not self.session.closed: 
                 await self.session.close()
@@ -547,9 +503,7 @@ class PlatoSoraPlugin(Star):
         self.conf = config
         self.sora_client: Optional[PlatoSoraPlugin.SoraAPIClient] = None
         self.grok_client: Optional[PlatoSoraPlugin.GrokAPIClient] = None
-        self._session: Optional[aiohttp.ClientSession] = None  # 通用会话
-        self._sora_processing: set = set()  # 防止 Sora 任务重复触发
-        self._grok_processing: set = set()  # 防止 Grok 任务重复触发
+        self._session: Optional[aiohttp.ClientSession] = None
         self.plugin_data_dir = StarTools.get_data_dir("astrbot_plugin_ai_video")
         self.videos_dir = Path(self.plugin_data_dir) / "videos"
         self.videos_dir.mkdir(exist_ok=True, parents=True)
@@ -558,10 +512,8 @@ class PlatoSoraPlugin(Star):
         if Image is None:
             logger.warning("Pillow 未安装，无法使用图片比例自动识别功能")
         
-        # 创建通用会话
         self._session = aiohttp.ClientSession()
-        timeout = self.conf.get("polling_timeout", 300)
-        self.polling_interval = self.conf.get("polling_interval", 5)
+        timeout = 300
         
         # Sora 客户端初始化
         if self.conf.get("sora_enabled", True):
@@ -630,8 +582,48 @@ class PlatoSoraPlugin(Star):
 
         event.stop_event()
 
+    # 视频风格信息（风格ID -> (中文名, 说明)）
+    STYLE_INFO = {
+        "festive": ("节日", "🎉 节日庆典风格，充满欢乐气氛"),
+        "kakalaka": ("混沌", "🪭 混沌艺术风格，独特视觉效果"),
+        "news": ("新闻", "📺 新闻播报风格，正式专业"),
+        "selfie": ("自拍", "🤳 自拍视角风格，第一人称"),
+        "handheld": ("手持", "📱 手持拍摄风格，真实抖动感"),
+        "golden": ("金色", "✨ 金色调风格，华丽高贵"),
+        "anime": ("动漫", "🎌 日式动漫风格，二次元画风"),
+        "retro": ("复古", "📼 复古怀旧风格，老电影质感"),
+        "nostalgic": ("怀旧", "🎞️ 老照片风格，泛黄胶片感"),
+        "comic": ("漫画", "💥 漫画风格，分镜画格效果"),
+    }
+
+    # 风格别名映射（中文/英文名 -> 风格ID）
+    STYLE_MAP = {
+        # 中文别名
+        "节日": "festive", "节庆": "festive",
+        "混沌": "kakalaka",
+        "新闻": "news",
+        "自拍": "selfie",
+        "手持": "handheld",
+        "金色": "golden",
+        "动漫": "anime", "动画": "anime",
+        "复古": "retro",
+        "怀旧": "nostalgic", "老照片": "nostalgic",
+        "漫画": "comic",
+        # 英文名称
+        "festive": "festive",
+        "kakalaka": "kakalaka",
+        "news": "news",
+        "selfie": "selfie",
+        "handheld": "handheld",
+        "golden": "golden",
+        "anime": "anime",
+        "retro": "retro",
+        "nostalgic": "nostalgic", "vintage": "nostalgic",
+        "comic": "comic",
+    }
+
     def _parse_sora_params(self, text: str) -> Tuple[str, Dict[str, Any]]:
-        """解析 Sora 参数（横/竖屏、时长）"""
+        """解析 Sora 参数（横/竖屏、时长、风格）"""
         params = {}
         
         # 移除命令前缀
@@ -660,6 +652,9 @@ class PlatoSoraPlugin(Star):
             elif p in ["25", "25s"]:
                 params['duration'] = 25
                 prompt_start = i + 1
+            elif p in self.STYLE_MAP:
+                params['style'] = self.STYLE_MAP[p]
+                prompt_start = i + 1
             else:
                 break
         
@@ -669,28 +664,17 @@ class PlatoSoraPlugin(Star):
     async def _generate_sora_video(self, event: AstrMessageEvent, prompt: str, params: Dict[str, Any]):
         """Sora 视频生成核心逻辑"""
         image_bytes = await self._get_image_from_event(event)
-        video_url_for_remix, video_orientation = self._get_video_info_from_event(event)
         
         duration = params.get('duration', 15)
         duration = min(max(duration, 10), 25)
+        style = params.get('style')
         
         # ===== 确定生成模式 =====
         
-        # 用户指定的方向优先，否则使用自动识别或默认值
         user_orientation = params.get('orientation')
         
-        # 视频二创（引用或发送了视频）
-        if video_url_for_remix:
-            # 方向：用户指定 > 视频自动识别 > 默认横屏
-            orientation = user_orientation or video_orientation or 'landscape'
-            prompt = f"{video_url_for_remix} {prompt}"
-            model = f"sora2-{orientation}-{duration}s"
-            mode_name = "视频二创"
-            logger.info(f"[{mode_name}] URL: {video_url_for_remix[:80]}...")
-        
         # 图生视频（引用或发送了图片）
-        elif image_bytes:
-            # 方向：用户指定 > 图片自动识别 > 默认横屏
+        if image_bytes:
             auto_orientation = await self._get_aspect_ratio_from_image(image_bytes)
             orientation = user_orientation or auto_orientation or 'landscape'
             model = f"sora2-{orientation}-{duration}s"
@@ -698,12 +682,23 @@ class PlatoSoraPlugin(Star):
         
         # 文生视频（纯文本）
         else:
-            orientation = user_orientation or 'landscape'
-            model = f"sora2-{orientation}-{duration}s"
+            # 如果用户指定了参数，动态生成模型名；否则使用配置的默认模型
+            if user_orientation or 'duration' in params:
+                orientation = user_orientation or 'landscape'
+                model = f"sora2-{orientation}-{duration}s"
+            else:
+                model = self.conf.get("sora_default_model", "sora2-landscape-15s")
             mode_name = "文生视频"
         
+        # 应用风格（在 prompt 前添加 {风格ID}）
+        style_name = None
+        if style:
+            prompt = f"{{{style}}}{prompt}"
+            style_name = self.STYLE_INFO.get(style, (style,))[0]  # 获取中文名
+            logger.info(f"[{mode_name}] 风格: {style_name}")
+        
         logger.info(f"[{mode_name}] 方向: {orientation}, 时长: {duration}秒, 模型: {model}")
-        yield event.plain_result(f"🎬 正在进行 [{mode_name}] ...")
+        yield event.plain_result(f"🎬 正在进行 [{mode_name}]{' (' + style_name + '风格)' if style_name else ''} ...")
 
         # 调用 API（统一的同步接口）
         video_url, error_msg = await self.sora_client.generate_video(
@@ -790,16 +785,28 @@ class PlatoSoraPlugin(Star):
                      "━━━━━━━━━━━━━━\n"
                      "【Sora 使用方法】\n\n"
                      "文生视频：\n"
-                     "格式：/sora [横/竖] [10/15/25] 提示词\n"
-                     "示例：/sora 横屏 25 一只奔跑的狗\n\n"
+                     "格式：/sora [横/竖] [10/15/25] [风格] 提示词\n"
+                     "示例：/sora 横 15 动漫 一只奔跑的狗\n\n"
                      "图生视频：\n"
-                     "格式：/sora [10/15/25] 提示词 + 图片\n"
+                     "格式：/sora [10/15/25] [风格] 提示词 + 图片\n"
                      "• 自动识别图片方向\n\n"
+                     "💡 发送 /sora风格 查看所有预设风格\n"
+                     "📌 不指定风格则使用默认效果\n\n"
                      "━━━━━━━━━━━━━━\n"
                      "【Grok 使用方法】\n\n"
                      "格式：/grok <提示词> + 图片\n"
                      "示例：/grok 让画面动起来\n")
         yield event.plain_result(help_text)
+
+    @filter.command("sora风格")
+    async def on_style_list(self, event: AstrMessageEvent):
+        """查看 Sora 视频风格列表"""
+        lines = ["【Sora 视频风格列表】\n"]
+        for style_id, (name, desc) in self.STYLE_INFO.items():
+            lines.append(f"• {name} ({style_id})\n  {desc}")
+        lines.append("\n使用方法：/sora [风格] 提示词")
+        lines.append("示例：/sora 动漫 一只猫在奔跑")
+        yield event.plain_result("\n".join(lines))
 
     # ==================== 权限检查 ====================
 

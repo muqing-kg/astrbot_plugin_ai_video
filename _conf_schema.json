@@ -17,9 +17,9 @@
         "type": "string",
         "default": ""
     },
-    "sora_model": {
-        "description": "【Sora】模型 ID",
-        "hint": "设置默认使用的视频生成模型名称",
+    "sora_default_model": {
+        "description": "【Sora】默认模型",
+        "hint": "不指定参数时使用的默认模型",
         "type": "string",
         "default": "sora2-landscape-15s"
     },
