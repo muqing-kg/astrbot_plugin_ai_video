@@ -21,7 +21,7 @@
         "description": "【Sora】模型 ID",
         "hint": "设置默认使用的视频生成模型名称",
         "type": "string",
-        "default": "sora-video-landscape-15s"
+        "default": "sora2-landscape-25s"
     },
     "grok_enabled": {
         "description": "【Grok】启用 Grok 视频生成",

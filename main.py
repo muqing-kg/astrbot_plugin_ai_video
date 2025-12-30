@@ -476,6 +476,9 @@ class PlatoSoraPlugin(Star):
             elif p in ["15", "15s"]:
                 params['duration'] = 15
                 prompt_start = i + 1
+            elif p in ["25", "25s"]:
+                params['duration'] = 25
+                prompt_start = i + 1
             else:
                 break
         
@@ -486,8 +489,8 @@ class PlatoSoraPlugin(Star):
         """Sora 视频生成核心逻辑"""
         image_bytes = await self._get_image_from_event(event)
         
-        duration = params.get('duration', 15)
-        duration = min(max(duration, 10), 15)
+        duration = params.get('duration', 25)
+        duration = min(max(duration, 10), 25)
         
         # 确定模型
         if image_bytes:
@@ -496,16 +499,16 @@ class PlatoSoraPlugin(Star):
             if not orientation:
                 yield event.plain_result("❌ 无法识别图片方向")
                 return
-            model = f"sora-video-{orientation}-{duration}s"
+            model = f"sora2-{orientation}-{duration}s"
             logger.info(f"图生视频 - 方向: {orientation}, 时长: {duration}秒, 模型: {model}")
         elif 'orientation' in params:
             # 文生视频：用户指定了方向
             orientation = params['orientation']
-            model = f"sora-video-{orientation}-{duration}s"
+            model = f"sora2-{orientation}-{duration}s"
             logger.info(f"文生视频 - 方向: {orientation}, 时长: {duration}秒, 模型: {model}")
         else:
             # 文生视频：用户未指定方向，使用配置的默认模型
-            model = self.conf.get("sora_model", "sora-video-landscape-15s")
+            model = self.conf.get("sora_model", "sora2-landscape-25s")
             logger.info(f"文生视频 - 使用默认模型: {model}")
         
         yield event.plain_result(f"🎬 正在进行 [{'图生视频' if image_bytes else '文生视频'}] ...")
@@ -605,10 +608,10 @@ class PlatoSoraPlugin(Star):
                      "━━━━━━━━━━━━━━\n"
                      "【Sora 使用方法】\n\n"
                      "文生视频：\n"
-                     "格式：/sora [横/竖] [10/15] 提示词\n"
-                     "示例：/sora 横屏 15 一只奔跑的狗\n\n"
+                     "格式：/sora [横/竖] [10/15/25] 提示词\n"
+                     "示例：/sora 横屏 25 一只奔跑的狗\n\n"
                      "图生视频：\n"
-                     "格式：/sora [10/15] 提示词 + 图片\n"
+                     "格式：/sora [10/15/25] 提示词 + 图片\n"
                      "• 自动识别图片方向\n\n"
                      "━━━━━━━━━━━━━━\n"
                      "【Grok 使用方法】\n\n"
