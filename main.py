@@ -131,6 +131,136 @@ class PlatoSoraPlugin(Star):
             except Exception:
                 pass
 
+    # ==================== 流式响应解析方法 ====================
+    
+    @staticmethod
+    def _extract_sse_payload(line_str: str) -> Optional[str]:
+        """从 SSE 行中提取数据载荷"""
+        line_str = line_str.strip()
+        if line_str.startswith('event:') or line_str.startswith(':'):
+            return None
+        if line_str.startswith('data: '):
+            return line_str[6:]
+        elif line_str.startswith('data:'):
+            return line_str[5:]
+        return None
+    
+    @staticmethod
+    def _extract_video_url(content: str) -> Optional[str]:
+        """从文本中提取视频 URL"""
+        if not content or not content.strip():
+            return None
+        
+        content = content.strip()
+        
+        # 直接 URL
+        if content.startswith(("http://", "https://")):
+            return content.split()[0].rstrip('.,;!?)\'"')
+        
+        # HTML video 标签
+        for pattern in [
+            r'<video[^>]*src=["\']([^"\']+)["\']',
+            r'<source[^>]*src=["\']([^"\']+)["\']',
+            r'<video[^>]*>\s*<source[^>]*src=["\']([^"\']+)["\']',
+        ]:
+            match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+            if match:
+                return match.group(1)
+        
+        # 视频文件扩展名 URL
+        match = re.search(r'(https?://[^\s<>"\')\]\\]+\.(?:mp4|webm|mov|avi|mkv)(?:[?][^\s<>"\')\]\\]*)?)', content, re.IGNORECASE)
+        if match:
+            return match.group(1)
+        
+        # Markdown 链接格式
+        match = re.search(r'!?\[[^\]]*\]\(([^)]+)\)', content)
+        if match:
+            url = match.group(1)
+            if url.startswith(("http://", "https://")):
+                return url
+        
+        # 通用 URL 提取
+        match = re.search(r'(https?://[^\s<>"\')\]\\]+)', content)
+        if match:
+            return match.group(1)
+        
+        return None
+    
+    @staticmethod
+    def _extract_content_from_chunk(chunk: dict) -> Optional[str]:
+        """从响应块中提取内容"""
+        if chunk.get("choices"):
+            choice = chunk["choices"][0]
+            if choice.get("delta"):
+                return choice["delta"].get("content", "")
+            if choice.get("message"):
+                return choice["message"].get("content", "")
+            if choice.get("text"):
+                return choice["text"]
+        for key in ("content", "text", "result", "output"):
+            if chunk.get(key):
+                return chunk[key]
+        return None
+    
+    @staticmethod
+    async def _parse_stream_response(resp, client_name: str = "API") -> Tuple[Optional[str], str]:
+        """解析响应，自动兼容流式和非流式格式"""
+        video_url = None
+        accumulated = []
+        is_streaming = False
+        raw_content = b""
+        
+        async for line in resp.content:
+            raw_content += line
+            if not line or not line.strip():
+                continue
+            
+            try:
+                line_str = line.decode('utf-8').strip()
+            except UnicodeDecodeError:
+                continue
+            
+            payload_str = PlatoSoraPlugin._extract_sse_payload(line_str)
+            if payload_str is not None:
+                is_streaming = True
+                payload_str = payload_str.strip()
+                if payload_str in ('[DONE]', 'done', ''):
+                    continue
+                
+                try:
+                    chunk = json.loads(payload_str)
+                    content = PlatoSoraPlugin._extract_content_from_chunk(chunk)
+                    if content:
+                        accumulated.append(content)
+                        url = PlatoSoraPlugin._extract_video_url(content)
+                        if url:
+                            video_url = url
+                            logger.info(f"[{client_name}] 检测到视频 URL: {url[:100]}...")
+                except json.JSONDecodeError:
+                    if payload_str.startswith(("http://", "https://")):
+                        video_url = payload_str.split()[0]
+                        logger.info(f"[{client_name}] 检测到直接 URL: {video_url[:100]}...")
+        
+        # 非流式响应处理
+        if not is_streaming and raw_content:
+            try:
+                full_json = json.loads(raw_content.decode('utf-8'))
+                content = PlatoSoraPlugin._extract_content_from_chunk(full_json)
+                if content:
+                    accumulated.append(content)
+                    video_url = PlatoSoraPlugin._extract_video_url(content)
+                    if video_url:
+                        logger.info(f"[{client_name}] 非流式响应检测到视频 URL: {video_url[:100]}...")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+        
+        full_text = "".join(accumulated)
+        if not video_url and full_text:
+            logger.info(f"[{client_name}] 累积响应: {full_text[:500]}...")
+            video_url = PlatoSoraPlugin._extract_video_url(full_text)
+        
+        return video_url, full_text
+
     # ==================== Sora API 客户端 ====================
     
     class SoraAPIClient:
@@ -193,52 +323,8 @@ class PlatoSoraPlugin(Star):
         
         async def _parse_stream_response(self, resp) -> Optional[str]:
             """解析流式响应，提取视频 URL"""
-            accumulated = []
-            async for line in resp.content:
-                if not line.strip():
-                    continue
-                line_str = line.decode('utf-8').strip()
-                if not line_str.startswith('data:'):
-                    continue
-                payload_str = line_str.split('data:', 1)[1].strip()
-                if payload_str == '[DONE]':
-                    break
-                try:
-                    chunk = json.loads(payload_str)
-                    if chunk.get("choices"):
-                        delta = chunk["choices"][0].get("delta", {})
-                        content = delta.get("content", "")
-                        if isinstance(content, str):
-                            accumulated.append(content)
-                except json.JSONDecodeError:
-                    continue
-            
-            full_text = "".join(accumulated)
-            return self._extract_video_url(full_text)
-        
-        def _extract_video_url(self, content: str) -> Optional[str]:
-            """从文本中提取视频 URL"""
-            # 直接 URL（http 开头）
-            if content.strip().startswith("http"):
-                return content.strip()
-            
-            # HTML video 标签
-            if "<video" in content and "src=" in content:
-                match = re.search(r'<video[^>]*src=["\']([^"\']+)["\']', content, re.IGNORECASE)
-                if match:
-                    return match.group(1)
-            
-            # 直接 .mp4 URL
-            match = re.search(r'(https?://[^\s<>"\')\\]]+\.mp4[^\s<>"\')\\]*)', content, re.IGNORECASE)
-            if match:
-                return match.group(1)
-            
-            # Markdown 链接
-            match = re.search(r'!?\[[^\]]*\]\(([^)]+)\)', content, re.IGNORECASE)
-            if match:
-                return match.group(1)
-            
-            return None
+            video_url, _ = await PlatoSoraPlugin._parse_stream_response(resp, "Sora")
+            return video_url
         
         async def terminate(self):
             if self.session and not self.session.closed: 
@@ -304,52 +390,8 @@ class PlatoSoraPlugin(Star):
         
         async def _parse_stream_response(self, resp) -> Optional[str]:
             """解析流式响应，提取视频 URL"""
-            accumulated = []
-            async for line in resp.content:
-                if not line.strip():
-                    continue
-                line_str = line.decode('utf-8').strip()
-                if not line_str.startswith('data:'):
-                    continue
-                payload_str = line_str.split('data:', 1)[1].strip()
-                if payload_str == '[DONE]':
-                    break
-                try:
-                    chunk = json.loads(payload_str)
-                    if chunk.get("choices"):
-                        delta = chunk["choices"][0].get("delta", {})
-                        content = delta.get("content", "")
-                        if isinstance(content, str):
-                            accumulated.append(content)
-                except json.JSONDecodeError:
-                    continue
-            
-            full_text = "".join(accumulated)
-            return self._extract_video_url(full_text)
-        
-        def _extract_video_url(self, content: str) -> Optional[str]:
-            """从文本中提取视频 URL"""
-            # 直接 URL（http 开头）
-            if content.strip().startswith("http"):
-                return content.strip()
-            
-            # HTML video 标签
-            if "<video" in content and "src=" in content:
-                match = re.search(r'<video[^>]*src=["\']([^"\']+)["\']', content, re.IGNORECASE)
-                if match:
-                    return match.group(1)
-            
-            # 直接 .mp4 URL
-            match = re.search(r'(https?://[^\s<>"\')\\]]+\.mp4[^\s<>"\')\\]*)', content, re.IGNORECASE)
-            if match:
-                return match.group(1)
-            
-            # Markdown 链接
-            match = re.search(r'!?\[[^\]]*\]\(([^)]+)\)', content, re.IGNORECASE)
-            if match:
-                return match.group(1)
-            
-            return None
+            video_url, _ = await PlatoSoraPlugin._parse_stream_response(resp, "Grok")
+            return video_url
         
         async def terminate(self):
             if self.session and not self.session.closed:
