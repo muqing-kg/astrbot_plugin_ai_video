@@ -1,0 +1,7 @@
+name: astrbot_plugin_ai_video
+display_name: AI视频生成
+desc: "集成 Sora 和 Grok 双引擎的视频生成插件，支持文生视频和图生视频。"
+version: 3.0.0
+author: 沐沐沐倾
+repo: https://github.com/muqing-kg/astrbot_plugin_ai_video
+social_link: https://jk.muqing.us.kg/status/muqing

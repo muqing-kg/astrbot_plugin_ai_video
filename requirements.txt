@@ -1,0 +1,4 @@
+aiohttp>=3.8.0
+aiofiles>=22.1.0
+Pillow>=9.0.0
+astrbot>=1.0.0

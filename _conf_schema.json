@@ -1,0 +1,98 @@
+{
+    "sora_enabled": {
+        "description": "【Sora】启用 Sora 视频生成",
+        "hint": "开启后可使用 /sora 命令进行文生视频和图生视频",
+        "type": "bool",
+        "default": true
+    },
+    "sora_api_url": {
+        "description": "【Sora】API 地址",
+        "hint": "请填写你的 Sora2API 地址, 例如: https://api.x.ai/v1/chat/completions",
+        "type": "string",
+        "default": "https://api.x.ai/v1/chat/completions"
+    },
+    "sora_api_key": {
+        "description": "【Sora】API 密钥",
+        "hint": "请填写你的 Sora2API 的 API Key",
+        "type": "string",
+        "default": ""
+    },
+    "sora_model": {
+        "description": "【Sora】模型 ID",
+        "hint": "设置默认使用的视频生成模型名称",
+        "type": "string",
+        "default": "sora-video-landscape-15s"
+    },
+    "grok_enabled": {
+        "description": "【Grok】启用 Grok 视频生成",
+        "hint": "开启后可使用 /grok 命令进行图生视频",
+        "type": "bool",
+        "default": true
+    },
+    "grok_api_url": {
+        "description": "【Grok】API 地址",
+        "hint": "Grok2API 服务地址，例如: https://api.x.ai/v1/chat/completions",
+        "type": "string",
+        "default": "https://api.x.ai/v1/chat/completions"
+    },
+    "grok_api_key": {
+        "description": "【Grok】API 密钥",
+        "hint": "请填写你的 Grok API 密钥",
+        "type": "string",
+        "default": ""
+    },
+    "grok_model": {
+        "description": "【Grok】模型 ID",
+        "hint": "Grok 视频生成模型，例如: grok-imagine-0.9",
+        "type": "string",
+        "default": "grok-imagine-0.9"
+    },
+    "user_whitelist": {
+        "description": "【权限】用户白名单",
+        "hint": "允许使用此插件的用户ID列表",
+        "type": "list",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
+    "user_blacklist": {
+        "description": "【权限】用户黑名单",
+        "hint": "禁止使用此插件的用户ID列表",
+        "type": "list",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
+    "group_whitelist": {
+        "description": "【权限】群聊白名单",
+        "hint": "允许使用此插件的群聊ID列表",
+        "type": "list",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
+    "group_blacklist": {
+        "description": "【权限】群聊黑名单",
+        "hint": "禁止使用此插件的群聊ID列表",
+        "type": "list",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
+    "polling_interval": {
+        "description": "【高级】任务状态检查间隔（秒）",
+        "hint": "向API查询视频生成任务状态的轮询间隔时间",
+        "type": "int",
+        "default": 5
+    },
+    "polling_timeout": {
+        "description": "【高级】任务超时时间（秒）",
+        "hint": "等待视频生成任务完成的最长时间",
+        "type": "int",
+        "default": 1500
+    }
+}
