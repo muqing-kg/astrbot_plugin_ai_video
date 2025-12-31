@@ -688,16 +688,17 @@ class PlatoSoraPlugin(Star):
                 model = f"sora2-{orientation}-{duration}s"
             else:
                 model = self.conf.get("sora_default_model", "sora2-landscape-15s")
+                orientation = "portrait" if "portrait" in model else "landscape"
             mode_name = "文生视频"
         
         # 应用风格（在 prompt 前添加 {风格ID}）
         style_name = None
         if style:
             prompt = f"{{{style}}}{prompt}"
-            style_name = self.STYLE_INFO.get(style, (style,))[0]  # 获取中文名
+            style_name = self.STYLE_INFO.get(style, (style,))[0]
             logger.info(f"[{mode_name}] 风格: {style_name}")
         
-        logger.info(f"[{mode_name}] 方向: {orientation}, 时长: {duration}秒, 模型: {model}")
+        logger.info(f"[{mode_name}] 模型: {model}")
         yield event.plain_result(f"🎬 正在进行 [{mode_name}]{' (' + style_name + '风格)' if style_name else ''} ...")
 
         # 调用 API（统一的同步接口）
